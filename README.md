@@ -10,5 +10,5 @@ For the main part of the code, see:
 - [hw.h](offgrid_f28034/hw.h)
 
 Also uses:
-- [sevenseg.h library by David Madison](github.com/dmadison/Segmented-LED-Display-ASCII)
+- [sevenseg.h library by David Madison](https://github.com/dmadison/Segmented-LED-Display-ASCII)
 - [C2000Ware header files and libraries from Texas Instruments](https://github.com/TexasInstruments/c2000ware-core-sdk/)
