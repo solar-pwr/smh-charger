@@ -1,3 +1,19 @@
+//    Custom firmware for EASUN ISolar-SMH-II-7K solar inverter charger
+//    Copyright (C) 2025-2026 Jakub Strnad
+//
+//    This program is free software: you can redistribute it and/or modify
+//    it under the terms of the GNU General Public License as published by
+//    the Free Software Foundation, either version 3 of the License, or
+//    (at your option) any later version.
+//
+//    This program is distributed in the hope that it will be useful,
+//    but WITHOUT ANY WARRANTY; without even the implied warranty of
+//    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//    GNU General Public License for more details.
+//
+//    You should have received a copy of the GNU General Public License
+//    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 #define GLOBAL_Q 16 // 1 bit sign, 15 bits integer, 16 bits decimal (-32768..+32767, 0.000015 resolution)
 
 #include "DSP28x_Project.h"
@@ -80,10 +96,10 @@ volatile uint16_t gridPolCnt = 0;
 volatile uint16_t gridLastZeroCross = 0;
 volatile int16_t gridPhase = 0, gridPhaseTmp = 0, gridPhaseLast = 0;
 volatile uint16_t gridRevPolTmp = 0;
-volatile _iq gridRevPolEma = 0;
+uint16_t gridRevPolSum;
+_iq gridRevPolEma;
 
 volatile int16_t invPwm = 0;
-volatile uint32_t vGridSqTmp = 0;
 volatile uint16_t faultCode = 0;
 
 volatile uint16_t gridVoltOk = 0;
@@ -109,23 +125,27 @@ volatile _iq pfcKd = _IQ(5.0);
 volatile uint16_t dcdcSts = DCDC_OFF;
 volatile uint16_t dcdcReq = 0;
 
-volatile int16_t vGridRaw = 0;
-volatile int16_t vGridOffset = -2048;
-volatile int16_t vGridAmplTmp = 0;
-volatile _iq vGridAmpl = 0;
-volatile _iq vGridAmplEma = 0;
-
-volatile int16_t vInvRaw = 0;
-volatile int16_t vInvOffset = -2048;
-volatile uint32_t vInvSqTmp = 0;
 volatile _iq vInv = 0;
 volatile _iq vInvLast = 0;
 volatile _iq vInvDelta = 0;
 
-volatile _iq vInvRms = 0;
-volatile _iq vGridRms = 0;
-volatile _iq vGridRmsMin = _IQ(230.0 * 0.8);
-volatile _iq vGridRmsMax = _IQ(230.0 * 1.2);
+volatile int16_t vInvRaw = 0;
+volatile int16_t vInvOffset = -2048;
+volatile uint32_t vInvSqTmp = 0;
+uint32_t vInvSqSum;
+_iq vInvRms;
+
+volatile int16_t vGridRaw = 0;
+volatile int16_t vGridOffset = -2048;
+volatile int16_t vGridAmplTmp = 0;
+int16_t vGridAmplRaw;
+volatile uint32_t vGridSqTmp = 0;
+uint32_t vGridSqSum;
+_iq vGridAmpl;
+_iq vGridAmplEma;
+_iq vGridRms;
+const _iq vGridRmsMin = _IQ(230.0 * 0.8);
+const _iq vGridRmsMax = _IQ(230.0 * 1.2);
 
 _iq iChargeReq = 0;
 _iq iChargeErr = 0;
@@ -145,20 +165,26 @@ volatile int16_t iCtlRaw = 0;
 volatile int16_t iCtlOffset = -2048;
 
 volatile int16_t iDcdcRaw = 0;
-volatile int32_t iDcdcTmp = 0;
 volatile int16_t iDcdcOffset = -2048;
+volatile int32_t iDcdcTmp = 0;
+int32_t iDcdcSum;
 volatile _iq iDcdc = 0;
 volatile _iq iDcdcEma = 0;
-volatile _iq iDcdcAvg = 0;
-volatile _iq iBat = 0;
+_iq iDcdcAvg;
+_iq iBat;
 
-volatile int32_t vBatRawTmp = 0;
-volatile _iq vBat = 0;
+volatile int32_t vBatTmp = 0;
+int32_t vBatSum;
+_iq vBat;
 
-volatile int32_t vBusRawTmp = 0;
 volatile _iq vBus = 0;
-volatile _iq vBusAvg = 0;
 volatile _iq vBusEma = 0;
+volatile int32_t vBusTmp = 0;
+int32_t vBusSum;
+_iq vBusAvg;
+
+volatile uint16_t newWaveData = 0;
+volatile int16_t newInvPeriod = 0;
 
 // temperature measurements
 uint16_t tSampleCnt = 0;
@@ -256,8 +282,8 @@ __interrupt void adcIsr() {
 	vGridAmplTmp = __max(abs(vGridRaw), vGridAmplTmp);
 	vInvSqTmp += (int32_t) vInvRaw * vInvRaw;
 	vGridSqTmp += (int32_t) vGridRaw * vGridRaw;
-	vBatRawTmp += ADC_VBAT;
-	vBusRawTmp += ADC_VBUS;
+	vBatTmp += ADC_VBAT;
+	vBusTmp += ADC_VBUS;
 	iDcdcTmp += iDcdcRaw;
 	vBusEma = _IQdiv16(vBusEma * 15 + vBus);
 	iDcdc = _IQmpyI32(iDcdcFactor, iDcdcRaw);
@@ -310,7 +336,6 @@ __interrupt void adcIsr() {
 	}
 	
 	if (pfcRun && !invSkip) {
-		// PERIOD * (1 - vInv / vBus)
 		
 		iInvReq = - _IQmpy(vInv, ivRatio);
 		iErr2 = iErr1;
@@ -325,6 +350,7 @@ __interrupt void adcIsr() {
 		pfcTune = _IQsat(pfcTune, _IQ(1.5), _IQ(0.5));
 
 		if (vBus != 0) {
+			// PERIOD * (1 - vInv / vBus)
 			pfcPwm = _IQmpy(_IQ(PERIOD), (_IQ(1.0) - _IQdiv(_IQabs(vInv), vBus)));
 			pfcPwm =_IQsat(_IQmpy(pfcPwm, pfcTune), ((_iq) pfcPwmMax) << 16, 0);
 		}
@@ -383,36 +409,23 @@ __interrupt void adcIsr() {
 			else if (angleStep > angleStepDefault) angleStep--;
 		}
 
-		// grid voltage amplitude
-		vGridAmpl = _IQmpyI32(vGridFactor, vGridAmplTmp);
-		vGridAmplEma = _IQdiv8(vGridAmplEma * 7 + vGridAmpl);
+		if (!newWaveData) {
+			vGridAmplRaw = vGridAmplTmp;
+			vInvSqSum = vInvSqTmp;
+			vGridSqSum = vGridSqTmp;
+			iDcdcSum = iDcdcTmp;
+			vBusSum = vBusTmp;
+			vBatSum = vBatTmp;
+			gridRevPolSum = gridRevPolTmp;
+			newInvPeriod = invPeriod;
+			newWaveData = 1;
+		}
 		vGridAmplTmp = 0;
-
-		// inverter RMS voltage (not needed in PFC mode)
-		// vInvRms = _IQmpy(_IQ8sqrt((vInvSqTmp / invPeriod) << 8) << 8, vInvFactor);
 		vInvSqTmp = 0;
-		vInvRms = 0;
-
-		// grid RMS voltage
-		vGridRms = _IQmpy(_IQ8sqrt((vGridSqTmp / invPeriod) << 8) << 8, vGridFactor);
 		vGridSqTmp = 0;
-
-		// DC/DC current
-		iDcdcAvg = _IQmpyI32(iDcdcFactor, iDcdcTmp / invPeriod);
-		iBat = _IQmpy(iDcdcAvg, dcdcRatio);
 		iDcdcTmp = 0;
-
-		// bus voltage (not needed)
-		// vBusAvg = _IQmpyI32(vBusFactor, vBusRawTmp / invPeriod);
-		vBusRawTmp = 0;
-		vBusAvg = 0;
-
-		// battery voltage
-		vBat = _IQmpyI32(vBatFactor, vBatRawTmp / invPeriod);
-		vBatRawTmp = 0;
-
-		// number of reverse polarity samples on grid voltage for PLL lock detection
-		gridRevPolEma = _IQdiv16(gridRevPolEma * 15 + ((uint32_t) gridRevPolTmp << 16));
+		vBusTmp = 0;
+		vBatTmp = 0;
 		gridRevPolTmp = 0;
 
 		if (invSkip) {
@@ -477,6 +490,35 @@ _iq ntc15kh4150(_iq adcVal) {
 	tmp = _IQdiv(_IQ(298.15), tmp); // T0/tmp
 	tmp = _IQmpy(_IQ(4150.0), tmp); // tmp*B
 	return tmp - _IQ(273.15); // tmp - TK
+}
+
+void calcWaveData() {
+	if (!newWaveData) return;
+
+	// grid voltage amplitude
+	vGridAmpl = _IQmpyI32(vGridFactor, vGridAmplRaw);
+	vGridAmplEma = _IQdiv8(vGridAmplEma * 7 + vGridAmpl);
+
+	// inverter RMS voltage (not needed in PFC mode)
+	vInvRms = _IQmpy(_IQ8sqrt((vInvSqSum / newInvPeriod) << 8) << 8, vInvFactor);
+
+	// grid RMS voltage
+	vGridRms = _IQmpy(_IQ8sqrt((vGridSqSum / newInvPeriod) << 8) << 8, vGridFactor);
+
+	// DC/DC current
+	iDcdcAvg = _IQmpyI32(iDcdcFactor, iDcdcSum / newInvPeriod);
+	iBat = _IQmpy(iDcdcAvg, dcdcRatio);
+
+	// bus voltage (not needed)
+	vBusAvg = _IQmpyI32(vBusFactor, vBusSum / newInvPeriod);
+
+	// battery voltage
+	vBat = _IQmpyI32(vBatFactor, vBatSum / newInvPeriod);
+
+	// number of reverse polarity samples on grid voltage for PLL lock detection
+	gridRevPolEma = _IQdiv16(gridRevPolEma * 15 + ((uint32_t) gridRevPolSum << 16));
+
+	newWaveData = 0;
 }
 
 void dcdcTask() {
@@ -1031,6 +1073,7 @@ void tempCheck() {
 	setFanPwm(fanPwm);
 }
 
+/*
 void initI2c() {
 	EALLOW;
 	I2caRegs.I2CMDR.all = 0;
@@ -1081,6 +1124,7 @@ uint16_t i2cReadBlock(uint16_t memAddr, uint16_t cntWords, uint16_t *bin) {
 	if (i != cntWords) return 0;
 	return 1;
 }
+*/
 
 void main() {
 	// C2000Ware device support functions BEGIN
@@ -1137,6 +1181,7 @@ void main() {
 		// once every full wave
 		if (timNow != timWave) {
 			timWave = timNow;
+			calcWaveData();
 			powerSwTask();
 			acChargeSwitch();
 			gridCheck();
