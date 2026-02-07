@@ -60,10 +60,10 @@ const _iq vInvDcFactor = _IQ(1.0 / 7.8 * 3.3 / 4096.0); // quite inaccurate in I
 //const _iq ivComp = _IQ(0.00002 * 50.0 * PERIOD / 3); // output capacitor power factor compensation
 
 const _iq iMaxDcdcShutdown = _IQ(0.5); // maximum current allowed when shutting down the DC/DC converter
-const int16_t iInvRawLimit = 500; // 22A - PWM will turn off if this is exceeded
-//const int16_t iInvRawLimit = 800; // 36A - PWM will turn off if this is exceeded
+//const int16_t iInvRawLimit = 500; // 22A - PWM will turn off if this is exceeded
+const int16_t iInvRawLimit = 800; // 36A - PWM will turn off if this is exceeded
 //const int16_t iInvRawLimit = 1005; // 45A - PWM will turn off if this is exceeded
-const int16_t iDcdcRawLimit = 410; // NOT USED 4.4A (=33A on battery)
+const _iq iDcdcLimit = _IQ(20.0); // 20A
 
 void delay(uint32_t cycles) {
 	uint32_t start = CpuTimer0Regs.TIM.all;
@@ -256,7 +256,7 @@ void epwmSetup() {
 	EPwm1Regs.AQCTLB.all = 0x0601;
 	EPwm1Regs.CMPA.half.CMPA = PERIOD;
 	EPwm1Regs.CMPB = PERIOD;
-	EPwm1Regs.AQSFRC.all = 0x00ed; // clear output A & B
+	EPwm1Regs.AQSFRC.all = 0x002d; // clear output A & B
 
 	// inv N
 	EPwm2Regs.TBCTL.all = 0x60a6; // N: up-down count, PHSEN (from EPWM1SYNCO)
@@ -267,7 +267,7 @@ void epwmSetup() {
 	EPwm2Regs.AQCTLB.all = 0x0601;
 	EPwm2Regs.CMPA.half.CMPA = PERIOD;
 	EPwm2Regs.CMPB = PERIOD;
-	EPwm2Regs.AQSFRC.all = 0x00ed; // clear output A & B
+	EPwm2Regs.AQSFRC.all = 0x002d; // clear output A & B
 
 	// charging buck
 	EPwm3Regs.TBCTL.all = 0x40a1; // buck - down count
@@ -276,7 +276,7 @@ void epwmSetup() {
 	EPwm3Regs.TBPRD = PERIOD;
 	EPwm3Regs.AQCTLA.all = 0x0049; // zero -> clear, period -> set, CMPA(decr.) -> clear
 	EPwm3Regs.CMPA.half.CMPA = PERIOD;
-	EPwm3Regs.AQSFRC.all = 0x00ed; // clear output A & B
+	EPwm3Regs.AQSFRC.all = 0x002d; // clear output A & B
 
 	// EPWM5A = MPPT boost
 	EPwm5Regs.TBCTL.all = 0x60a2; // up-down count
@@ -285,7 +285,7 @@ void epwmSetup() {
 	EPwm5Regs.TBPRD = PERIOD;
 	EPwm5Regs.AQCTLA.all = 0x0061;
 	EPwm5Regs.CMPA.half.CMPA = PERIOD;
-	EPwm5Regs.AQSFRC.all = 0x00ed; // clear output A & B
+	EPwm5Regs.AQSFRC.all = 0x002d; // clear output A & B
 
 	// EPWM6B = beep
 
@@ -295,7 +295,7 @@ void epwmSetup() {
 	EPwm7Regs.TBPRD = FAN_PERIOD;
 	EPwm7Regs.AQCTLB.all = 0x0409;
 	EPwm7Regs.CMPB = FAN_PERIOD;
-	EPwm7Regs.AQSFRC.all = 0x00ed; // clear output A & B
+	EPwm7Regs.AQSFRC.all = 0x002d; // clear output A & B
 
 	EPwm1Regs.CMPCTL.all = 0x0000; // shadow reload on zero
 	EPwm2Regs.CMPCTL.all = 0x0000; // shadow reload on zero
@@ -375,9 +375,9 @@ inline void buckSetPwm(int16_t pwm) {
 }
 
 inline void buckPwmOff() {
-	EPwm3Regs.AQSFRC.all = 0x00c5; // clear output A
+	EPwm3Regs.AQSFRC.all = 0x0005; // clear output A
 	EPwm3Regs.CMPA.half.CMPA = PERIOD;
-	EPwm3Regs.AQSFRC.all = 0x00c5; // clear output A
+	EPwm3Regs.AQSFRC.all = 0x0005; // clear output A
 }
 
 inline void pfcSetPwm(int16_t invPwm) {
@@ -399,15 +399,16 @@ inline void pfcSetPwm(int16_t invPwm) {
 }
 
 inline void pfcPwmOff() {
-	EPwm1Regs.AQSFRC.all = 0x00ed; // clear output A & B
+	EPwm1Regs.AQSFRC.all = 0x002d; // clear output A & B
+	EPwm2Regs.AQSFRC.all = 0x002d; // clear output A & B
+
 	EPwm1Regs.CMPA.half.CMPA = PERIOD;
 	EPwm1Regs.CMPB = PERIOD;
-	EPwm1Regs.AQSFRC.all = 0x00ed; // clear output A & B
-
-	EPwm2Regs.AQSFRC.all = 0x00ed; // clear output A & B
 	EPwm2Regs.CMPA.half.CMPA = PERIOD;
 	EPwm2Regs.CMPB = PERIOD;
-	EPwm2Regs.AQSFRC.all = 0x00ed; // clear output A & B
+	
+	EPwm1Regs.AQSFRC.all = 0x002d; // clear output A & B
+	EPwm2Regs.AQSFRC.all = 0x002d; // clear output A & B
 }
 
 void lcdCsOn() {

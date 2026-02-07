@@ -114,8 +114,8 @@ volatile _iq iErr0 = 0;
 volatile _iq iErr1 = 0;
 volatile _iq iErr2 = 0;
 volatile _iq pfcPwm;
-volatile _iq pfcTune = 0.5;
-volatile uint16_t invSkip = 0;
+volatile _iq pfcTune = 0.2;
+volatile uint16_t pfcPause = 0;
 volatile uint16_t sc = 0;
 volatile uint16_t scTot = 0;
 volatile _iq pfcKp = _IQ(4.0);
@@ -148,11 +148,15 @@ const _iq vGridRmsMin = _IQ(230.0 * 0.8);
 const _iq vGridRmsMax = _IQ(230.0 * 1.2);
 
 _iq iChargeReq = 0;
-_iq iChargeErr = 0;
+_iq iChargeErr0 = 0;
+_iq iChargeErr1 = 0;
+_iq iChargeErr2 = 0;
 _iq iChargeSet = _IQ(50.0);
 _iq vBatAcStart = _IQ(53.0);
 _iq vBatAcStop = _IQ(55.5);
-uint16_t iChargeLowCnt = 0;
+_iq acChargeKp = 30; // 30/65536
+_iq acChargeKi = 20; // 20/65536
+_iq acChargeKd = 15; // 15/65536
 uint16_t acCharge = 1;
 
 volatile int16_t iInvRaw = 0;
@@ -220,89 +224,83 @@ volatile uint16_t start, end, maxEnd = 0;
 __interrupt void adcIsr() {
 	start = CpuTimer0Regs.TIM.all;
 
-	vInvRaw = ADC_VINV + vInvOffset;
+	// check for inverter overcurrent
 	iInvRaw = ADC_IINV + iInvOffset;
-	iDcdcRaw = ADC_IDCDC + iDcdcOffset;
-	vBus = _IQmpy((uint32_t) ADC_VBUS << 16, vBusFactor);
+	if (abs(iInvRaw) > iInvRawLimit) {
+		if (pfcRun) {
+			pfcPwmOff();
+			pfcPause = 2;
+			scTot++;
+			if (sc > 1000) {
+				pfcRun = 0;
+				faultCode = 51; // overload/surge
+				faultDcdcEma = iDcdcEma;
+				faultIInv = iInv;
+				faultPwm = invPwm;
+				faultIvRatio = ivRatio;
+			} else {
+				sc += 100;
+			}
+		}
+	}
 
 	// check for bus overvoltage
+	vBus = _IQmpyI32(vBusFactor, ADC_VBUS);
 	if (vBus > _IQ(490.0)) {
 		if (pfcRun) {
 			pfcPwmOff();
-			invSkip = 100;
-			if (vBusEma > _IQ(495.0)) {
-				pfcRun = 0;
-				faultCode = 8;
-			}
+			pfcPause = 2;
 		}
 
 		if (vBusEma > _IQ(495.0)) {
 			softStartOff();
 			dcdcSts = DCDC_OFF;
 			dcdcReq = 0;
-			faultCode = 8;
-		}
-	}
-
-	// check for inverter overcurrent
-	if (abs(iInvRaw) > iInvRawLimit) {
-		if (pfcRun) {
-			pfcPwmOff();
-			invSkip = 5;
-			sc += 100;
-			scTot++;
-		}
-	} else {
-		if (sc > 0) sc--;
-	}
-	if (sc > 1000) {
-		pfcRun = 0;
-		faultCode = 51; // overload
-		faultDcdcEma = iDcdcEma;
-		iInv = _IQmpy((int32_t) iInvRaw << 16, iInvFactor);
-		faultIInv = iInv;
-		faultPwm = invPwm;
-		faultIvRatio = ivRatio;
-	}
-/*	if (abs(iDcdcRaw) > iDcdcRawLimit) {
-		if (pfcRun) {
-			pfcPwmOff();
 			pfcRun = 0;
-			faultCode = 12; // DC/DC overcurrent
+			faultCode = 8; // bus voltage too high
 		}
-		buckPwmOff();
-	}*/
+	}
 
-	timInv++;
-	vGridRaw = ADC_VGRID + vGridOffset;
-	iCthRaw = ADC_ICTH + iCthOffset;
-	iCtlRaw = ADC_ICTL + iCtlOffset;
-	vInv = _IQmpy(vInvFactor, (int32_t) vInvRaw << 16);
-	iInv = _IQmpy(iInvFactor, (int32_t) iInvRaw << 16);
-	vGridAmplTmp = __max(abs(vGridRaw), vGridAmplTmp);
-	vInvSqTmp += (int32_t) vInvRaw * vInvRaw;
-	vGridSqTmp += (int32_t) vGridRaw * vGridRaw;
-	vBatTmp += ADC_VBAT;
-	vBusTmp += ADC_VBUS;
+	// check for DC/DC bus side overcurrent
+	iDcdcRaw = ADC_IDCDC + iDcdcOffset;
 	iDcdcTmp += iDcdcRaw;
-	vBusEma = _IQdiv16(vBusEma * 15 + vBus);
 	iDcdc = _IQmpyI32(iDcdcFactor, iDcdcRaw);
 	iDcdcEma = _IQdiv16(iDcdcEma * 15 + iDcdc);
-
-	vInvDelta = vInv - vInvLast;
-	vInvLast = vInv;
-
-	// DC/DC bus side overcurrent
-	if (_IQabs(iDcdcEma) > _IQ(24.0)) {
+	if (_IQabs(iDcdcEma) > iDcdcLimit) {
 		if (pfcRun) {
 			pfcPwmOff();
+			buckPwmOff();
 			pfcRun = 0;
-			faultCode = 12;
+			buckPwm = 0;
+			faultCode = 12; // DC/DC overcurrent
 			faultDcdcEma = iDcdcEma;
 			faultIInv = iInv;
 			faultPwm = invPwm;
 		}
 	}
+
+	timInv++;
+
+	// other ADC measurements
+	vInvRaw = ADC_VINV + vInvOffset;
+	vInv = _IQmpyI32(vInvFactor, vInvRaw);
+	vInvSqTmp += (int32_t) vInvRaw * vInvRaw;
+	vInvDelta = vInv - vInvLast;
+	vInvLast = vInv;
+
+	vGridRaw = ADC_VGRID + vGridOffset;
+	vGridAmplTmp = __max(abs(vGridRaw), vGridAmplTmp);
+	vGridSqTmp += (int32_t) vGridRaw * vGridRaw;
+
+	iInv = _IQmpyI32(iInvFactor, iInvRaw);
+
+	vBatTmp += ADC_VBAT;
+
+	vBusTmp += ADC_VBUS;
+	vBusEma = _IQdiv16(vBusEma * 15 + vBus);
+
+	iCthRaw = ADC_ICTH + iCthOffset;
+	iCtlRaw = ADC_ICTL + iCtlOffset;
 
 	// grid period measurement
         if ((vGridRaw < 0 && gridPol) || (vGridRaw >= 0 && !gridPol)) {
@@ -335,8 +333,8 @@ __interrupt void adcIsr() {
 			gridPhaseTmp--;
 	}
 	
-	if (pfcRun && !invSkip) {
-		
+	// PFC switching control
+	if (pfcRun && !pfcPause) {
 		iInvReq = - _IQmpy(vInv, ivRatio);
 		iErr2 = iErr1;
 		iErr1 = iErr0;
@@ -347,7 +345,7 @@ __interrupt void adcIsr() {
 			_IQmpy(iErr0, pfcKi) + 
 			_IQmpy(iErr0 - (iErr1 << 1) + iErr2, pfcKd)) >> 8;
 
-		pfcTune = _IQsat(pfcTune, _IQ(1.5), _IQ(0.5));
+		pfcTune = _IQsat(pfcTune, _IQ(1.5), _IQ(0.2));
 
 		if (vBus != 0) {
 			// PERIOD * (1 - vInv / vBus)
@@ -362,8 +360,6 @@ __interrupt void adcIsr() {
 
 		pfcSetPwm(invPwm);
 	} else {
-		ivRatio = 0;
-		pfcTune = 0.5;
 		pfcPwm = 0;
 		invPwm = 0;
 		pfcPwmOff();
@@ -428,9 +424,7 @@ __interrupt void adcIsr() {
 		vBatTmp = 0;
 		gridRevPolTmp = 0;
 
-		if (invSkip) {
-			invSkip--;
-		}
+		if (sc && pfcRun) sc--;
 	}
 
 	end = CpuTimer0Regs.TIM.all;
@@ -676,16 +670,22 @@ void vramTask() {
 			if (key == KEY_UP) iChargeSet += _IQ(1.0);
 			break;
 		case LCDLEFT_PFC_KP:
-			if (key == KEY_DOWN) pfcKp -= _IQ(0.2);
-			if (key == KEY_UP) pfcKp += _IQ(0.2);
+//			if (key == KEY_DOWN) pfcKp -= _IQ(0.2);
+//			if (key == KEY_UP) pfcKp += _IQ(0.2);
+			if (key == KEY_DOWN) acChargeKp--;
+			if (key == KEY_UP) acChargeKp++;
 			break;
 		case LCDLEFT_PFC_KI:
-			if (key == KEY_DOWN) pfcKi -= _IQ(0.2);
-			if (key == KEY_UP) pfcKi += _IQ(0.2);
+//			if (key == KEY_DOWN) pfcKi -= _IQ(0.2);
+//			if (key == KEY_UP) pfcKi += _IQ(0.2);
+			if (key == KEY_DOWN) acChargeKi--;
+			if (key == KEY_UP) acChargeKi++;
 			break;
 		case LCDLEFT_PFC_KD:
-			if (key == KEY_DOWN) pfcKd -= _IQ(0.5);
-			if (key == KEY_UP) pfcKd += _IQ(0.5);
+//			if (key == KEY_DOWN) pfcKd -= _IQ(0.5);
+//			if (key == KEY_UP) pfcKd += _IQ(0.5);
+			if (key == KEY_DOWN) acChargeKd--;
+			if (key == KEY_UP) acChargeKd++;
 			break;
 		}
 	} else {
@@ -779,13 +779,16 @@ void vramTask() {
 		iqTo3dig(0, ((int32_t) maxEnd) * 6554);
 		break;
 	case LCDLEFT_PFC_KP:
-		iqTo3dig(0, pfcKp);
+//		iqTo3dig(0, pfcKp);
+		iqTo3dig(0, acChargeKp << 16);
 		break;
 	case LCDLEFT_PFC_KI:
-		iqTo3dig(0, pfcKi);
+//		iqTo3dig(0, pfcKi);
+		iqTo3dig(0, acChargeKi << 16);
 		break;
 	case LCDLEFT_PFC_KD:
-		iqTo3dig(0, pfcKd);
+//		iqTo3dig(0, pfcKd);
+		iqTo3dig(0, acChargeKd << 16);
 		break;
 	}
 
@@ -909,6 +912,7 @@ void pfcTask() {
 		gridRelayWait = 0;
 		pfcRun = 0;
 		ivRatio = 0;
+		pfcTune = _IQ(0.2);
 		dcdcReq = 0;
 		if (dcdcSts == DCDC_OFF) {
 			gridRelayOff();
@@ -917,7 +921,7 @@ void pfcTask() {
 }
 
 void acChargeTask() {
-	_iq ivRatioTmp;
+	_iq ivRatioTmp, ivRatioAdj;
 
 	if (!pfcRun || faultCode) {
 		ivRatio = 0;
@@ -934,31 +938,27 @@ void acChargeTask() {
 
 	iChargeReq = _IQrsmpy(vBatAcStop - vBat, iChargeSet);
 	iChargeReq = _IQrsmpy(iChargeReq, _IQ(10.0)); // current slope starts 0.1V below charging voltage
-	iChargeReq = _IQsat(iChargeReq, iChargeSet, _IQdiv2(iChargeSet)); // minimum half charging current
+	iChargeReq = _IQsat(iChargeReq, iChargeSet, _IQdiv4(iChargeSet)); // minimum quarter charging current
 
-//	iChargeReq = iChargeSet;
+	iChargeErr2 = iChargeErr1;
+	iChargeErr1 = iChargeErr0;
+	iChargeErr0 = iChargeReq - iBat;
+	ivRatioAdj =
+		_IQmpy(iChargeErr0 - iChargeErr1, acChargeKp) +
+		_IQmpy(iChargeErr0, acChargeKi) +
+		_IQmpy(iChargeErr0 - 2 * iChargeErr1 + iChargeErr2, acChargeKd);
+	ivRatioAdj = _IQsat(ivRatioAdj, 32, -64); // 32/65536, -64/63356
+	ivRatioTmp = _IQsat(ivRatio + ivRatioAdj, _IQ(0.13), _IQ(0));
 
-	iChargeErr = iChargeReq - iBat;
-	ivRatioTmp = ivRatio;
-
-	// charge current too low
-	if (iChargeErr > _IQ(1.0)) {
-		if (iChargeLowCnt < 100) {
-			iChargeLowCnt++;
-		} else {
-			ivRatioTmp += 5;
-		}
+	DINT;
+	if (!pfcPause) {
+		ivRatio = ivRatioTmp;
 	} else {
-		iChargeLowCnt = 0;
-
-		// charge current too high
-		if (iChargeErr < _IQ(-1.0)) {
-			ivRatioTmp -= 10;
-		}
+		ivRatio = 0;
+		pfcTune = 0.2;
+		pfcPause--;
 	}
-
-	// possible race condition when invSkip > 0
-	ivRatio = _IQsat(ivRatioTmp, _IQ(0.13), _IQ(0));
+	EINT;
 }
 
 void zeroOffsetCal() {
@@ -1186,12 +1186,12 @@ void main() {
 			acChargeSwitch();
 			gridCheck();
 			pfcTask();
+			acChargeTask();
 		}
 
 		vramTask();
 		lcdTask();
 		dcdcTask();
-		acChargeTask();
 		tempCheck();
 		if (snapReady) {
 			comPrintInt(snapIdx);
