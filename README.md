@@ -12,3 +12,5 @@ For the main part of the code, see:
 Also uses:
 - [sevenseg.h library by David Madison](https://github.com/dmadison/Segmented-LED-Display-ASCII)
 - [C2000Ware header files and libraries from Texas Instruments](https://github.com/TexasInstruments/c2000ware-core-sdk/)
+- IQmath library from Texas Instruments (TMS320F28034 does not have a FPU)
+- [Velocity form PID algorithm](https://literature.rockwellautomation.com/idc/groups/literature/documents/wp/logix-wp008_-en-p.pdf)
