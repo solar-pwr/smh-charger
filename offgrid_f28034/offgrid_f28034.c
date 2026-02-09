@@ -100,7 +100,6 @@ volatile uint16_t gridRevPolTmp = 0;
 uint16_t gridRevPolSum;
 _iq gridRevPolEma;
 
-volatile int16_t invPwm = 0;
 volatile uint16_t faultCode = 0;
 
 volatile uint16_t gridVoltOk = 0;
@@ -115,7 +114,7 @@ volatile _iq iErr0 = 0;
 volatile _iq iErr1 = 0;
 volatile _iq iErr2 = 0;
 volatile _iq pfcPwm;
-volatile _iq pfcTune = 0.2;
+volatile _iq pfcTune = 0;
 volatile uint16_t pfcPause = 0;
 volatile uint16_t sc = 0;
 volatile uint16_t scTot = 0;
@@ -239,7 +238,7 @@ __interrupt void adcIsr() {
 				faultCode = 51; // overload/surge
 				faultDcdcEma = iDcdcEma;
 				faultIInv = iInv;
-				faultPwm = invPwm;
+				faultPwm = _IQint(pfcPwm);
 				faultIvRatio = ivRatio;
 			} else {
 				sc += 100;
@@ -278,7 +277,7 @@ __interrupt void adcIsr() {
 			faultCode = 12; // DC/DC overcurrent
 			faultDcdcEma = iDcdcEma;
 			faultIInv = iInv;
-			faultPwm = invPwm;
+			faultPwm = _IQint(pfcPwm);
 		}
 	}
 
@@ -337,7 +336,11 @@ __interrupt void adcIsr() {
 	}
 	
 	// PFC switching control
-	if (pfcRun && !pfcPause) {
+	if (
+	  pfcRun &&
+	  !pfcPause &&
+	  vBus != 0
+	  ) {
 		iInvReq = - _IQmpy(vInv, ivRatio);
 		iErr2 = iErr1;
 		iErr1 = iErr0;
@@ -348,24 +351,19 @@ __interrupt void adcIsr() {
 			_IQmpy(iErr0, pfcKi) + 
 			_IQmpy(iErr0 - (iErr1 << 1) + iErr2, pfcKd)) >> 8;
 
-		pfcTune = _IQsat(pfcTune, _IQ(1.5), _IQ(0.2));
+		pfcTune = _IQsat(pfcTune, _IQ(1.5), 0);
 
-		if (vBus != 0) {
-			// PERIOD * (1.02 - vInv / vBus)
-			// Don't ask me why 1.02. It just shows better results than just 1 :)
-			pfcPwm = _IQmpy(_IQ(PERIOD), (_IQ(1.02) - _IQdiv(_IQabs(vInv), vBus)));
-			pfcPwm =_IQsat(_IQmpy(pfcPwm, pfcTune), pfcPwmMax, 0);
-		}
+		// PERIOD * (1.02 - vInv / vBus)
+		// Don't ask me why 1.02. It just shows better results than just 1 :)
+		pfcPwm = _IQmpy(_IQ(PERIOD), (_IQ(1.02) - _IQdiv(_IQabs(vInv), vBus)));
+		pfcPwm = _IQsat(_IQmpy(pfcPwm, pfcTune), pfcPwmMax, 0);
 
 		if (vInv < 0)
-			invPwm = _IQint(pfcPwm);
+			pfcSetPwm(_IQint(pfcPwm));
 		else
-			invPwm = - _IQint(pfcPwm);
-
-		pfcSetPwm(invPwm);
+			pfcSetPwm(-_IQint(pfcPwm));
 	} else {
 		pfcPwm = 0;
-		invPwm = 0;
 		pfcPwmOff();
 	}
 
@@ -374,7 +372,7 @@ __interrupt void adcIsr() {
 		snapIInv = iInvRaw;
 		snapICth = iCthRaw;
 		snapICtl = iCtlRaw;
-		snapPwm = invPwm;
+		snapPwm = _IQint(pfcPwm);
 		snapVBus = ADC_VBUS;
 		snapIvRatio = ivRatio;
 		snapIDcdc = iDcdcRaw;
@@ -914,28 +912,26 @@ void pfcTask() {
 		if (dcdcSts && gridRelaySts)
 			pfcRun = 1;
 	} else {
-		gridRelayWait = 0;
 		pfcRun = 0;
 		ivRatio = 0;
-		pfcTune = _IQ(0.2);
+		pfcTune = 0;
 		dcdcReq = 0;
 		gridRelayReq = 0;
 	}
 }
 
 void gridRelayTask() {
-	if (gridRelayWait > 10) {
+	if (gridRelayWait == 0 || gridRelayWait > 10) {
 		gridRelayWait = 0;
 		gridRelaySts = gridRelayGpioSts();
 	} else if (gridRelayWait > 0) {
 		gridRelayWait++;
 	}
 	
-	if (pfcRun) return;
-
 	if (gridRelayReq &&
 	  !gridRelayGpioSts() &&
 	  !outRelayGpioSts() &&
+	  !pfcRun &&
 	  dcdcSts == DCDC_ON &&
 	  vGridAmplEma + _IQ(20.0) < _IQmpy(vBat, dcdcRatio)
 	) {
@@ -985,7 +981,7 @@ void acChargeTask() {
 		ivRatio = ivRatioTmp;
 	} else {
 		ivRatio = 0;
-		pfcTune = 0.2;
+		pfcTune = 0;
 		pfcPause--;
 	}
 	EINT;
