@@ -52,7 +52,7 @@ const uint16_t lcdSegMap[8][7] = {
 	{ 87, 86, 85, 80, 81, 83, 82 }
 };
 
-enum { MODE_CHARGER, MODE_INVERTER };
+enum { MODE_STARTUP, MODE_ACCHARGE, MODE_INVERTER };
 enum { DCDC_OFF, DCDC_SOFTSTART, DCDC_ON };
 
 enum { KEY_INV, KEY_ESC, KEY_UP, KEY_DOWN, KEY_ENTER };
@@ -68,7 +68,8 @@ uint16_t lcdLeftSel = 0;
 uint16_t lcdSetMode = 0;
 uint16_t lcdBatLevel = 0;
 
-volatile uint16_t mode = MODE_CHARGER;
+uint16_t mode = MODE_STARTUP;
+uint16_t startupCnt = 0;
 
 volatile _iq28 angle = 0; // 0 .. 2xPI (IQ28 range -8..+7)
 
@@ -83,7 +84,7 @@ const uint16_t angleStepPhaseShift = 5;
 
 const uint16_t gridPeriodMin = DSP_CLK / PERIOD / 2 / (50.0 * 1.1);
 const uint16_t gridPeriodMax = DSP_CLK / PERIOD / 2 / (50.0 * 0.9);
-const uint16_t pfcPwmMax = 0.95 * PERIOD; // 1200;
+const _iq pfcPwmMax = _IQ(0.96 * PERIOD);
 
 volatile uint16_t timInv = 0; // inv. interrupt counter (0-65535)
 volatile uint16_t invIdx = 0; // inv. wave index
@@ -106,7 +107,7 @@ volatile uint16_t gridVoltOk = 0;
 volatile uint16_t gridVoltOkCnt = 0;
 volatile uint16_t gridPllOk = 0;
 volatile uint16_t gridPllOkCnt = 0;
-volatile uint16_t swOn = 1;
+uint16_t swOn = 1;
 volatile uint16_t pfcRun = 0;
 volatile _iq ivRatio = 0;
 volatile _iq iInvReq = 0;
@@ -119,7 +120,7 @@ volatile uint16_t pfcPause = 0;
 volatile uint16_t sc = 0;
 volatile uint16_t scTot = 0;
 volatile _iq pfcKp = _IQ(4.0);
-volatile _iq pfcKi = _IQ(2.0);
+volatile _iq pfcKi = _IQ(2.5);
 volatile _iq pfcKd = _IQ(5.0);
 
 volatile uint16_t dcdcSts = DCDC_OFF;
@@ -155,7 +156,7 @@ _iq iChargeSet = _IQ(50.0);
 _iq vBatAcStart = _IQ(53.0);
 _iq vBatAcStop = _IQ(55.5);
 _iq acChargeKp = 30; // 30/65536
-_iq acChargeKi = 20; // 20/65536
+_iq acChargeKi = 30; // 30/65536
 _iq acChargeKd = 15; // 15/65536
 uint16_t acCharge = 1;
 
@@ -205,6 +206,8 @@ uint16_t timLcd = 0;
 uint16_t timWave = 0; // 50 Hz
 uint16_t timTempCheck = 0;
 uint16_t gridRelayWait = 0;
+uint16_t gridRelaySts = 0;
+uint16_t gridRelayReq = 0;
 
 uint16_t acStartCnt = 0, acStopCnt = 0;
 
@@ -214,7 +217,7 @@ uint16_t vram[8];
 
 // DEBUG
 volatile int16_t snapReady, snapIdx, snapVInv, snapIInv, snapIInv1, snapVInv1, snapICth, snapICtl;
-volatile int16_t snapIDcdc, snapPwm, snapVBus, snapIvRatio, snapVBat, snapIInvReq;
+volatile int16_t snapIDcdc, snapPwm, snapVBus, snapIvRatio, snapVBat, snapIInvReq, snapPfcTune;
 
 volatile _iq faultDcdcEma, faultIInv, faultIvRatio;
 volatile uint16_t faultPwm;
@@ -348,9 +351,10 @@ __interrupt void adcIsr() {
 		pfcTune = _IQsat(pfcTune, _IQ(1.5), _IQ(0.2));
 
 		if (vBus != 0) {
-			// PERIOD * (1 - vInv / vBus)
-			pfcPwm = _IQmpy(_IQ(PERIOD), (_IQ(1.0) - _IQdiv(_IQabs(vInv), vBus)));
-			pfcPwm =_IQsat(_IQmpy(pfcPwm, pfcTune), ((_iq) pfcPwmMax) << 16, 0);
+			// PERIOD * (1.02 - vInv / vBus)
+			// Don't ask me why 1.02. It just shows better results than just 1 :)
+			pfcPwm = _IQmpy(_IQ(PERIOD), (_IQ(1.02) - _IQdiv(_IQabs(vInv), vBus)));
+			pfcPwm =_IQsat(_IQmpy(pfcPwm, pfcTune), pfcPwmMax, 0);
 		}
 
 		if (vInv < 0)
@@ -376,6 +380,7 @@ __interrupt void adcIsr() {
 		snapIDcdc = iDcdcRaw;
 		snapVBat = ADC_VBAT;
 		snapIInvReq = iInvReq >> 8;
+		snapPfcTune = pfcTune >> 8;
 		snapReady = 1;
 	}
 
@@ -405,6 +410,7 @@ __interrupt void adcIsr() {
 			else if (angleStep > angleStepDefault) angleStep--;
 		}
 
+		// new values to be processed outside of interrupt
 		if (!newWaveData) {
 			vGridAmplRaw = vGridAmplTmp;
 			vInvSqSum = vInvSqTmp;
@@ -430,8 +436,7 @@ __interrupt void adcIsr() {
 	end = CpuTimer0Regs.TIM.all;
 	if (start - end > maxEnd) maxEnd = start - end;
 
-	EALLOW;
-	AdcRegs.ADCINTFLGCLR.all |= 0x01ff;
+	AdcRegs.ADCINTFLGCLR.all = 1;
 	PieCtrlRegs.PIEACK.all = PIEACK_GROUP1;
 }
 
@@ -670,22 +675,22 @@ void vramTask() {
 			if (key == KEY_UP) iChargeSet += _IQ(1.0);
 			break;
 		case LCDLEFT_PFC_KP:
-//			if (key == KEY_DOWN) pfcKp -= _IQ(0.2);
-//			if (key == KEY_UP) pfcKp += _IQ(0.2);
-			if (key == KEY_DOWN) acChargeKp--;
-			if (key == KEY_UP) acChargeKp++;
+			if (key == KEY_DOWN) pfcKp -= _IQ(0.2);
+			if (key == KEY_UP) pfcKp += _IQ(0.2);
+//			if (key == KEY_DOWN) acChargeKp--;
+//			if (key == KEY_UP) acChargeKp++;
 			break;
 		case LCDLEFT_PFC_KI:
-//			if (key == KEY_DOWN) pfcKi -= _IQ(0.2);
-//			if (key == KEY_UP) pfcKi += _IQ(0.2);
-			if (key == KEY_DOWN) acChargeKi--;
-			if (key == KEY_UP) acChargeKi++;
+			if (key == KEY_DOWN) pfcKi -= _IQ(0.2);
+			if (key == KEY_UP) pfcKi += _IQ(0.2);
+//			if (key == KEY_DOWN) acChargeKi--;
+//			if (key == KEY_UP) acChargeKi++;
 			break;
 		case LCDLEFT_PFC_KD:
-//			if (key == KEY_DOWN) pfcKd -= _IQ(0.5);
-//			if (key == KEY_UP) pfcKd += _IQ(0.5);
-			if (key == KEY_DOWN) acChargeKd--;
-			if (key == KEY_UP) acChargeKd++;
+			if (key == KEY_DOWN) pfcKd -= _IQ(0.5);
+			if (key == KEY_UP) pfcKd += _IQ(0.5);
+//			if (key == KEY_DOWN) acChargeKd--;
+//			if (key == KEY_UP) acChargeKd++;
 			break;
 		}
 	} else {
@@ -779,16 +784,16 @@ void vramTask() {
 		iqTo3dig(0, ((int32_t) maxEnd) * 6554);
 		break;
 	case LCDLEFT_PFC_KP:
-//		iqTo3dig(0, pfcKp);
-		iqTo3dig(0, acChargeKp << 16);
+		iqTo3dig(0, pfcKp);
+//		iqTo3dig(0, acChargeKp << 16);
 		break;
 	case LCDLEFT_PFC_KI:
-//		iqTo3dig(0, pfcKi);
-		iqTo3dig(0, acChargeKi << 16);
+		iqTo3dig(0, pfcKi);
+//		iqTo3dig(0, acChargeKi << 16);
 		break;
 	case LCDLEFT_PFC_KD:
-//		iqTo3dig(0, pfcKd);
-		iqTo3dig(0, acChargeKd << 16);
+		iqTo3dig(0, pfcKd);
+//		iqTo3dig(0, acChargeKd << 16);
 		break;
 	}
 
@@ -899,24 +904,49 @@ void gridCheck() {
 }
 
 void pfcTask() {
-	if (acCharge && gridPllOk && gridVoltOk && !faultCode) {
+	if (acCharge &&
+	  gridPllOk &&
+	  gridVoltOk &&
+	  !faultCode
+	) {
 		dcdcReq = 1;
-		if (dcdcSts == DCDC_ON && !outRelaySts()) {
-			gridRelayOn();
-			if (gridRelayWait < 10)
-				gridRelayWait++;
-			else
-				pfcRun = 1;
-		}
+		gridRelayReq = 1;
+		if (dcdcSts && gridRelaySts)
+			pfcRun = 1;
 	} else {
 		gridRelayWait = 0;
 		pfcRun = 0;
 		ivRatio = 0;
 		pfcTune = _IQ(0.2);
 		dcdcReq = 0;
-		if (dcdcSts == DCDC_OFF) {
-			gridRelayOff();
-		}
+		gridRelayReq = 0;
+	}
+}
+
+void gridRelayTask() {
+	if (gridRelayWait > 10) {
+		gridRelayWait = 0;
+		gridRelaySts = gridRelayGpioSts();
+	} else if (gridRelayWait > 0) {
+		gridRelayWait++;
+	}
+	
+	if (pfcRun) return;
+
+	if (gridRelayReq &&
+	  !gridRelayGpioSts() &&
+	  !outRelayGpioSts() &&
+	  dcdcSts == DCDC_ON &&
+	  vGridAmplEma + _IQ(20.0) < _IQmpy(vBat, dcdcRatio)
+	) {
+		gridRelayOn();
+		gridRelayWait = 1;
+	} else if (
+	  !gridRelayReq &&
+	  gridRelayGpioSts()
+	) {
+		gridRelayOff();
+		gridRelayWait = 1;
 	}
 }
 
@@ -1126,6 +1156,64 @@ uint16_t i2cReadBlock(uint16_t memAddr, uint16_t cntWords, uint16_t *bin) {
 }
 */
 
+void startupMode() {
+	timNow = waveCnt;
+
+	// once every full wave
+	if (timNow != timWave) {
+		timWave = timNow;
+		calcWaveData();
+		gridCheck();
+		startupCnt++;
+		if (startupCnt > 50) mode = MODE_ACCHARGE;
+	}
+	vramTask();
+	lcdTask();
+	tempCheck();
+}
+
+void acChargeMode() {
+	timNow = waveCnt;
+
+	// once every full wave
+	if (timNow != timWave) {
+		timWave = timNow;
+		calcWaveData();
+		powerSwTask();
+		gridCheck();
+		acChargeSwitch();
+		pfcTask();
+		acChargeTask();
+		gridRelayTask();
+	}
+
+	vramTask();
+	lcdTask();
+	dcdcTask();
+	tempCheck();
+	
+	if (snapReady) {
+		comPrintInt(snapIdx);
+		comTx(';');
+		comPrintInt(snapVInv);
+		comTx(';');
+		comPrintInt(snapIInv);
+		comTx(';');
+		comPrintInt(snapPwm);
+		comTx(';');
+		comPrintInt(snapIInvReq);
+		comTx(';');
+		comPrintInt(snapPfcTune);
+		comTx(13);
+		comTx(10);
+		DINT;
+		snapIdx++;
+		if (snapIdx >= invPeriod) snapIdx = 0;
+		snapReady = 0;
+		EINT;
+	}
+}
+
 void main() {
 	// C2000Ware device support functions BEGIN
 	memcpy(	(uint16_t *)&RamfuncsRunStart,
@@ -1176,42 +1264,13 @@ void main() {
 	snapReady = 0;
 	EINT;
 	while (1) {
-		timNow = waveCnt;
-
-		// once every full wave
-		if (timNow != timWave) {
-			timWave = timNow;
-			calcWaveData();
-			powerSwTask();
-			acChargeSwitch();
-			gridCheck();
-			pfcTask();
-			acChargeTask();
-		}
-
-		vramTask();
-		lcdTask();
-		dcdcTask();
-		tempCheck();
-		if (snapReady) {
-			comPrintInt(snapIdx);
-			comTx(';');
-			comPrintInt(snapVInv);
-			comTx(';');
-			comPrintInt(snapIInv);
-			comTx(';');
-			comPrintInt(snapPwm);
-			comTx(';');
-			comPrintInt(snapIInvReq);
-			comTx(';');
-			comPrintInt(snapIDcdc);
-			comTx(13);
-			comTx(10);
-			DINT;
-			snapIdx++;
-			if (snapIdx >= invPeriod) snapIdx = 0;
-			snapReady = 0;
-			EINT;
+		switch (mode) {
+		case MODE_STARTUP:
+			startupMode();
+			break;
+		case MODE_ACCHARGE:
+			acChargeMode();
+			break;
 		}
 	}
 }

@@ -102,7 +102,7 @@ inline void gridRelayOff() {
 	GpioDataRegs.GPACLEAR.bit.GPIO19 = 1;
 }
 
-inline uint16_t gridRelaySts() {
+inline uint16_t gridRelayGpioSts() {
 	return GpioDataRegs.GPADAT.bit.GPIO19;
 }
 
@@ -114,7 +114,7 @@ inline void outRelayOff() {
 	GpioDataRegs.GPACLEAR.bit.GPIO12 = 1;
 }
 
-inline uint16_t outRelaySts() {
+inline uint16_t outRelayGpioSts() {
 	return GpioDataRegs.GPADAT.bit.GPIO12;
 }
 
